@@ -793,8 +793,8 @@ export default {
     // ---- 右键菜单 ----
     openItemMenu(task, event) {
       this.menuItem = task;
-      const menuWidth = 160;
-      const menuHeight = 150;
+      const menuWidth = 180;
+      const menuHeight = 210;
       let left = event.clientX;
       let top = event.clientY;
       if (left + menuWidth > window.innerWidth - 8) {
@@ -811,6 +811,21 @@ export default {
     closeItemMenu() {
       this.menuVisible = false;
       this.menuItem = null;
+    },
+    // 打开创建任务表单，预填父任务 ID（右键菜单「创建子任务」）
+    createSubtask(task) {
+      this.closeItemMenu();
+      if (!task) return;
+      this.createForm = {
+        title: "",
+        description: "",
+        tags: "",
+        due_date: todayStr(),
+        parent_id: String(task.id || ""),
+      };
+      this.creating = true;
+      this.error = "";
+      this.message = "";
     },
     // 生成执行该任务的提示词
     buildTaskPrompt(task) {
@@ -1331,6 +1346,8 @@ export default {
     <!-- 列表项右键菜单 -->
     <div v-if="menuVisible" :style="menuStyle"
       style="position:fixed;z-index:9999;background:#2d2d30;border:1px solid #454545;border-radius:6px;box-shadow:0 4px 12px #0008;padding:4px;min-width:140px;">
+      <div @click="createSubtask(menuItem)"
+        style="padding:6px 10px;font-size:12px;color:#ddd;cursor:pointer;border-radius:4px;white-space:nowrap;">创建子任务</div>
       <div @click="createAgentForTask(menuItem)"
         style="padding:6px 10px;font-size:12px;color:#ddd;cursor:pointer;border-radius:4px;white-space:nowrap;">创建 Agent 执行该任务</div>
       <div @click="createAgentInWorkdir(menuItem)"
