@@ -42,3 +42,6 @@ htmlcov/
 .DS_Store
 # Jarvis 本地运行产物
 .jarviscache/
+
+# Jarvis 本地工具缓存
+.jarvis/

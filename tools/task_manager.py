@@ -14,10 +14,13 @@ AutoWorker 待办事项（TODO）管理工具（Agent 侧）。
 
 参数:
 - action (str): 动作，可选 create_task / update_task / set_status / add_note /
-  list_tasks / get_task。
+  list_tasks / get_task / delete_task / restore_task / link_task / unlink_task。
 - workdir (str, 可选): 后端工作目录（任务子目录的父目录）。默认由当前工作目录推断。
 - task_id (str, 可选): 任务 ID（如 T001）。默认取当前任务。
 - title / description / tags / due_date / status / content: 各动作对应字段。
+- parent_id (str, 可选): 父任务 ID（create_task/update_task），空表示顶层任务。
+- target_id / relation / link_note: 关联任务（link_task/unlink_task）。
+- cascade (bool): delete_task 是否级联删除子任务，默认 false（有子任务时阻止）。
 
 返回:
 - success (bool)
@@ -52,6 +55,8 @@ _KNOWN_ACTIONS = {
     "get_task",
     "delete_task",
     "restore_task",
+    "link_task",
+    "unlink_task",
 }
 
 
@@ -130,6 +135,8 @@ class TaskManagerTool:
                     "get_task",
                     "delete_task",
                     "restore_task",
+                    "link_task",
+                    "unlink_task",
                 ],
                 "description": "要执行的动作",
             },
@@ -192,6 +199,43 @@ class TaskManagerTool:
                 "type": "boolean",
                 "description": (
                     "list_tasks 是否在列表项中返回备注全文，默认 false（只返回 note_count）。"
+                ),
+            },
+            "tree": {
+                "type": "boolean",
+                "description": (
+                    "list_tasks 是否按树形返回：每项附带 depth/children_count/"
+                    "child_done_count，便于展示父子层级与子任务完成进度。默认 false。"
+                ),
+            },
+            "parent_id": {
+                "type": "string",
+                "description": (
+                    "父任务 ID（create_task/update_task）。create_task 不传则为顶层任务；"
+                    "update_task 传空字符串表示移到顶层，不传则不修改父子关系。"
+                ),
+            },
+            "target_id": {
+                "type": "string",
+                "description": "关联目标任务 ID（link_task/unlink_task）。",
+            },
+            "relation": {
+                "type": "string",
+                "enum": ["related", "blocked_by", "blocks", "duplicate"],
+                "description": (
+                    "关联类型（link_task/unlink_task，默认 related）："
+                    "related 相关 / blocked_by 被阻塞 / blocks 阻塞 / duplicate 重复。"
+                ),
+            },
+            "link_note": {
+                "type": "string",
+                "description": "关联说明（link_task，可选）。",
+            },
+            "cascade": {
+                "type": "boolean",
+                "description": (
+                    "delete_task 是否级联删除全部子任务，默认 false"
+                    "（任务有子任务时阻止删除）。"
                 ),
             },
         },
@@ -264,6 +308,7 @@ class TaskManagerTool:
                     offset=args.get("offset"),
                     # Agent 侧默认不返回备注全文（只给 note_count），节省上下文
                     include_notes=bool(args.get("include_notes")),
+                    tree=bool(args.get("tree")),
                 )
                 return self._ok(result)
 
@@ -277,6 +322,7 @@ class TaskManagerTool:
                     description=args.get("description", ""),
                     tags=args.get("tags"),
                     due_date=args.get("due_date"),
+                    parent_id=args.get("parent_id"),
                 )
                 return self._ok(result)
 
@@ -301,6 +347,8 @@ class TaskManagerTool:
                     description=args.get("description"),
                     tags=args.get("tags"),
                     due_date=args.get("due_date"),
+                    # 未传 parent_id 表示不修改；传空串表示移到顶层
+                    parent_id=args.get("parent_id"),
                 )
             elif action == "set_status":
                 result = api.set_status(
@@ -316,11 +364,28 @@ class TaskManagerTool:
                 )
             elif action == "delete_task":
                 result = api.delete_task(
-                    workdir=ctx["workdir"], task_id=ctx["task_id"]
+                    workdir=ctx["workdir"],
+                    task_id=ctx["task_id"],
+                    cascade=bool(args.get("cascade")),
                 )
             elif action == "restore_task":
                 result = api.restore_task(
                     workdir=ctx["workdir"], task_id=ctx["task_id"]
+                )
+            elif action == "link_task":
+                result = api.link_task(
+                    workdir=ctx["workdir"],
+                    task_id=ctx["task_id"],
+                    target_id=args.get("target_id"),
+                    relation=args.get("relation"),
+                    note=args.get("link_note", ""),
+                )
+            elif action == "unlink_task":
+                result = api.unlink_task(
+                    workdir=ctx["workdir"],
+                    task_id=ctx["task_id"],
+                    target_id=args.get("target_id"),
+                    relation=args.get("relation"),
                 )
             else:
                 return self._err(f"未知 action: {action}")
