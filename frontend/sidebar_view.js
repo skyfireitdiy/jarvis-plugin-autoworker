@@ -133,6 +133,48 @@ const STATUS_COLORS = {
   abandoned: "#888",
 };
 const STATUS_ORDER = ["running", "pending", "completed", "abandoned"];
+// 关联类型展示名
+const RELATION_LABELS = {
+  related: "相关",
+  blocked_by: "被阻塞",
+  blocks: "阻塞",
+  duplicate: "重复",
+};
+const RELATION_OPTIONS = ["related", "blocked_by", "blocks", "duplicate"];
+
+// 由 parent_id 推导 children 映射（parent_id 为唯一事实来源）
+function buildChildrenMap(tasks) {
+  const ids = new Set(tasks.map((t) => t.id));
+  const map = {};
+  for (const t of tasks) {
+    const pid = t.parent_id;
+    if (pid && ids.has(pid)) {
+      (map[pid] = map[pid] || []).push(t.id);
+    }
+  }
+  return map;
+}
+
+// 计算每个任务的树深度（顶层 0）；悬空 parent_id 视为顶层，带环防御
+function computeDepths(tasks) {
+  const byId = {};
+  for (const t of tasks) byId[t.id] = t;
+  const depth = {};
+  const visiting = new Set();
+  const calc = (id) => {
+    if (depth[id] !== undefined) return depth[id];
+    if (visiting.has(id)) return 0;
+    visiting.add(id);
+    const t = byId[id] || {};
+    const pid = t.parent_id;
+    const d = pid && byId[pid] ? calc(pid) + 1 : 0;
+    visiting.delete(id);
+    depth[id] = d;
+    return d;
+  };
+  for (const t of tasks) calc(t.id);
+  return depth;
+}
 
 export default {
   name: "AutoWorkerSidebarView",
@@ -144,6 +186,14 @@ export default {
       // 状态映射暴露到实例，供模板使用（模板无法访问模块作用域变量）
       STATUS_LABELS,
       STATUS_COLORS,
+      RELATION_LABELS,
+      RELATION_OPTIONS,
+      // 树形视图：已收起的任务 ID 集合（Set 在 Vue3 中响应式）
+      collapsed: new Set(),
+      // 详情页：新增关联表单
+      linkForm: { target_id: "", relation: "related", note: "" },
+      // 详情页：当前查看的子任务（用于跳转）
+      childTasks: [],
       // 节点列表与当前节点（master 恒在列）
       nodes: [],
       nodeId: "master",
@@ -162,12 +212,12 @@ export default {
       message: "",
       // 详情/编辑
       selected: null,
-      editForm: { title: "", description: "", tags: "", due_date: todayStr() },
+      editForm: { title: "", description: "", tags: "", due_date: todayStr(), parent_id: "" },
       // 手动添加关键信息（note）输入
       noteInput: "",
       // 新建任务表单
       creating: false,
-      createForm: { title: "", description: "", tags: "", due_date: todayStr() },
+      createForm: { title: "", description: "", tags: "", due_date: todayStr(), parent_id: "" },
       // 右键菜单
       menuVisible: false,
       menuStyle: {},
@@ -176,6 +226,18 @@ export default {
     };
   },
   computed: {
+    // id -> 任务（供子任务进度/父任务展示）
+    taskById() {
+      const map = {};
+      for (const t of this.tasks) map[t.id] = t;
+      return map;
+    },
+    // 由 parent_id 推导的 children 映射
+    childrenMap() {
+      return buildChildrenMap(this.tasks);
+    },
+    // 树形扁平序列：按状态分组后，组内按父子层级排序（父在前、子紧随其后），
+    // 被收起父任务的整棵子树不输出。每项附带 depth/has_children/collapsed。
     groupedTasks() {
       const groups = {};
       for (const s of STATUS_ORDER) groups[s] = [];
@@ -183,11 +245,47 @@ export default {
         const s = STATUS_LABELS[t.status] ? t.status : "pending";
         groups[s].push(t);
       }
+      const byId = this.taskById;
+      const childrenMap = this.childrenMap;
+      const depthMap = computeDepths(this.tasks);
+      const visited = new Set();
+      const result = [];
+      const walk = (task) => {
+        if (visited.has(task.id)) return;
+        visited.add(task.id);
+        const kids = childrenMap[task.id] || [];
+        const isCollapsed = this.collapsed.has(task.id);
+        result.push({
+          task,
+          depth: depthMap[task.id] || 0,
+          hasChildren: kids.length > 0,
+          collapsed: isCollapsed,
+          childDone: kids.filter(
+            (cid) => byId[cid] && byId[cid].status === "completed",
+          ).length,
+          childTotal: kids.length,
+        });
+        if (isCollapsed) return;
+        for (const cid of kids) {
+          if (byId[cid]) walk(byId[cid]);
+        }
+      };
+      for (const s of STATUS_ORDER) {
+        // 先走顶层任务，再兜底走孤儿（父任务被过滤/删除）任务
+        for (const t of groups[s]) {
+          const pid = t.parent_id;
+          if (!pid || !byId[pid]) walk(t);
+        }
+        for (const t of groups[s]) walk(t);
+      }
       return STATUS_ORDER.filter((s) => groups[s].length > 0).map((s) => ({
         status: s,
         label: STATUS_LABELS[s],
         color: STATUS_COLORS[s],
         items: groups[s],
+        // 本组内实际可见（未被子树收起）的条目
+        visible: result.filter((r) => r.task.status === s ||
+          (!STATUS_LABELS[r.task.status] && s === "pending")),
       }));
     },
   },
@@ -466,6 +564,7 @@ export default {
           const found = this.tasks.find((t) => t.id === this.selected.id);
           if (found) this.selected = found;
         }
+        this.refreshChildTasks();
       } catch (e) {
         if (!silent) this.error = String((e && e.message) || e);
       } finally {
@@ -491,12 +590,16 @@ export default {
         description: task.description || "",
         tags: this.tagsText(task.tags),
         due_date: task.due_date || todayStr(),
+        parent_id: task.parent_id || "",
       };
       this.message = "";
       this.error = "";
+      this.linkForm = { target_id: "", relation: "related", note: "" };
+      this.refreshChildTasks();
     },
     back() {
       this.selected = null;
+      this.childTasks = [];
     },
     async saveTask() {
       if (!this.selected) return;
@@ -515,6 +618,8 @@ export default {
           description: this.editForm.description,
           tags: this.editForm.tags,
           due_date: this.editForm.due_date,
+          // 空字符串表示移到顶层
+          parent_id: (this.editForm.parent_id || "").trim(),
         }, this.nodeId);
         this.message = "已保存";
         await this.refresh(true);
@@ -528,7 +633,13 @@ export default {
     toggleCreate() {
       this.creating = !this.creating;
       if (this.creating) {
-        this.createForm = { title: "", description: "", tags: "", due_date: todayStr() };
+        this.createForm = {
+          title: "",
+          description: "",
+          tags: "",
+          due_date: todayStr(),
+          parent_id: "",
+        };
         this.error = "";
       }
     },
@@ -547,6 +658,7 @@ export default {
           description: this.createForm.description,
           tags: this.createForm.tags,
           due_date: this.createForm.due_date,
+          parent_id: (this.createForm.parent_id || "").trim(),
         }, this.nodeId);
         const created = payload.data || {};
         this.message = `已创建任务 ${created.id || ""}`;
@@ -583,7 +695,18 @@ export default {
     async deleteTask(task) {
       this.closeItemMenu();
       if (!task) return;
-      if (!window.confirm(`确定删除任务 ${task.id}「${task.title || ""}」？\n数据将保留（软删除），可从列表移除。`)) {
+      const kids = this.childrenMap[task.id] || [];
+      let cascade = false;
+      if (kids.length > 0) {
+        // 有子任务：默认阻止，询问是否级联删除整棵子树
+        if (!window.confirm(
+          `任务 ${task.id}「${task.title || ""}」下有 ${kids.length} 个子任务（${kids.join(", ")}）。\n`
+          + "确定级联删除该任务及其全部子任务？\n数据将保留（软删除），可从列表移除。",
+        )) {
+          return;
+        }
+        cascade = true;
+      } else if (!window.confirm(`确定删除任务 ${task.id}「${task.title || ""}」？\n数据将保留（软删除），可从列表移除。`)) {
         return;
       }
       this.busy = true;
@@ -593,6 +716,7 @@ export default {
         await callFunction("delete_task", {
           workdir: this.workdir,
           task_id: task.id,
+          cascade: cascade,
         }, this.nodeId);
         this.message = `任务 ${task.id} 已删除`;
         // 若删除的是当前详情页任务，返回列表
@@ -849,6 +973,107 @@ export default {
         border: `1px solid ${STATUS_COLORS[status] || "#444"}`,
       };
     },
+    // ---- 树形视图 ----
+    // 展开/收起某任务的子树
+    toggleCollapse(task) {
+      if (!task) return;
+      if (this.collapsed.has(task.id)) {
+        this.collapsed.delete(task.id);
+      } else {
+        this.collapsed.add(task.id);
+      }
+    },
+    // 列表项缩进（按树深度）
+    indentStyle(depth) {
+      return { marginLeft: `${(depth || 0) * 14}px` };
+    },
+    // 子任务完成进度文案，如 "3/5 完成"
+    childProgress(done, total) {
+      if (!total) return "";
+      return `${done}/${total} 完成`;
+    },
+    // 详情页：取当前任务的子任务列表
+    refreshChildTasks() {
+      if (!this.selected) {
+        this.childTasks = [];
+        return;
+      }
+      const kids = this.childrenMap[this.selected.id] || [];
+      this.childTasks = kids
+        .map((cid) => this.taskById[cid])
+        .filter(Boolean);
+    },
+    // 详情页：父任务（若存在）
+    parentTaskOf(task) {
+      if (!task || !task.parent_id) return null;
+      return this.taskById[task.parent_id] || null;
+    },
+    // 跳转到指定任务详情（关联/子任务/父任务点击）
+    jumpToTask(taskId) {
+      if (!taskId) return;
+      const target = this.taskById[taskId];
+      if (!target) {
+        this.error = `任务不存在或已删除: ${taskId}`;
+        return;
+      }
+      this.openTask(target);
+    },
+    // 关联任务展示：目标任务标题（找不到时回退 ID）
+    linkTitle(link) {
+      const target = this.taskById[link.task_id];
+      return target ? `${target.id} ${target.title || ""}`.trim() : link.task_id;
+    },
+    // 添加关联
+    async addLink(task) {
+      if (!task) return;
+      const targetId = (this.linkForm.target_id || "").trim();
+      if (!targetId) {
+        this.error = "请填写关联任务 ID";
+        return;
+      }
+      this.busy = true;
+      this.error = "";
+      this.message = "";
+      try {
+        await callFunction("link_task", {
+          workdir: this.workdir,
+          task_id: task.id,
+          target_id: targetId,
+          relation: this.linkForm.relation || "related",
+          note: this.linkForm.note || "",
+        }, this.nodeId);
+        this.message = `任务 ${task.id} 已关联 ${targetId}`;
+        this.linkForm = { target_id: "", relation: "related", note: "" };
+        await this.refresh(true);
+        this.refreshChildTasks();
+      } catch (e) {
+        this.error = String((e && e.message) || e);
+      } finally {
+        this.busy = false;
+      }
+    },
+    // 解除关联
+    async removeLink(task, link) {
+      if (!task || !link) return;
+      this.busy = true;
+      this.error = "";
+      this.message = "";
+      try {
+        await callFunction("unlink_task", {
+          workdir: this.workdir,
+          task_id: task.id,
+          target_id: link.task_id,
+          relation: link.relation,
+        }, this.nodeId);
+        this.message = `已解除与 ${link.task_id} 的关联`;
+        await this.refresh(true);
+        this.refreshChildTasks();
+      } catch (e) {
+        this.error = String((e && e.message) || e);
+      } finally {
+        this.busy = false;
+      }
+    },
   },
   template: `
   <div style="padding:12px;font-size:13px;color:#ddd;overflow:auto;height:100%;box-sizing:border-box;">
@@ -936,6 +1161,8 @@ export default {
           style="width:100%;box-sizing:border-box;margin-bottom:6px;padding:5px 8px;background:#1e1e1e;color:#ddd;border:1px solid #444;border-radius:4px;font-size:12px;">
         <input v-model="createForm.due_date" type="date" placeholder="截止日期"
           style="width:100%;box-sizing:border-box;margin-bottom:6px;padding:5px 8px;background:#1e1e1e;color:#ddd;border:1px solid #444;border-radius:4px;font-size:12px;">
+        <input v-model="createForm.parent_id" type="text" list="aw-task-ids" placeholder="父任务 ID（可选，留空为顶层任务）"
+          style="width:100%;box-sizing:border-box;margin-bottom:6px;padding:5px 8px;background:#1e1e1e;color:#ddd;border:1px solid #444;border-radius:4px;font-size:12px;">
         <div style="display:flex;gap:6px;">
           <button @click="createTask" :disabled="busy"
             style="padding:5px 12px;background:#1f6feb;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px;">创建</button>
@@ -947,20 +1174,35 @@ export default {
       <div v-if="loading" style="color:#888;padding:20px;text-align:center;">加载中…</div>
       <div v-else-if="tasks.length === 0" style="color:#888;padding:20px;text-align:center;">暂无任务</div>
 
+      <!-- 父任务 ID 候选（供创建/编辑表单输入提示） -->
+      <datalist id="aw-task-ids">
+        <option v-for="t in tasks" :key="t.id" :value="t.id">{{ t.title }}</option>
+      </datalist>
+
       <div v-for="g in groupedTasks" :key="g.status" style="margin-bottom:12px;">
         <div :style="{color:g.color,fontSize:'11px',fontWeight:'600',marginBottom:'4px'}">
           {{ g.label }} ({{ g.items.length }})
         </div>
-        <div v-for="t in g.items" :key="t.id"
-          @click="openTask(t)" @contextmenu.prevent="openItemMenu(t, $event)"
+        <div v-for="row in g.visible" :key="row.task.id"
+          @click="openTask(row.task)" @contextmenu.prevent="openItemMenu(row.task, $event)"
+          :style="indentStyle(row.depth)"
           style="padding:8px;margin-bottom:6px;background:#252526;border-radius:6px;cursor:pointer;border-left:3px solid #58a6ff;">
-          <div style="display:flex;justify-content:space-between;">
-            <span style="color:#888;">{{ t.id }}</span>
-            <span :style="{color: STATUS_COLORS[t.status] || '#888', fontSize:'11px'}">{{ STATUS_LABELS[t.status] || t.status }}</span>
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <span style="display:flex;align-items:center;gap:4px;">
+              <span v-if="row.hasChildren" @click.stop="toggleCollapse(row.task)"
+                :title="row.collapsed ? '展开子任务' : '收起子任务'"
+                style="color:#888;font-size:11px;cursor:pointer;user-select:none;width:12px;display:inline-block;">{{ row.collapsed ? '▶' : '▼' }}</span>
+              <span v-else style="width:12px;display:inline-block;"></span>
+              <span style="color:#888;">{{ row.task.id }}</span>
+            </span>
+            <span :style="{color: STATUS_COLORS[row.task.status] || '#888', fontSize:'11px'}">{{ STATUS_LABELS[row.task.status] || row.task.status }}</span>
           </div>
-          <div style="margin-top:2px;font-weight:600;">{{ t.title }}</div>
-          <div v-if="tagsText(t.tags)" style="font-size:11px;color:#888;margin-top:2px;">{{ tagsText(t.tags) }}</div>
-          <div v-if="t.due_date" style="font-size:11px;color:#d29922;margin-top:2px;">截止 {{ t.due_date }}</div>
+          <div style="margin-top:2px;font-weight:600;">{{ row.task.title }}</div>
+          <div v-if="row.hasChildren" style="font-size:11px;color:#58a6ff;margin-top:2px;">
+            子任务 {{ childProgress(row.childDone, row.childTotal) }}
+          </div>
+          <div v-if="tagsText(row.task.tags)" style="font-size:11px;color:#888;margin-top:2px;">{{ tagsText(row.task.tags) }}</div>
+          <div v-if="row.task.due_date" style="font-size:11px;color:#d29922;margin-top:2px;">截止 {{ row.task.due_date }}</div>
         </div>
       </div>
     </div>
@@ -984,9 +1226,58 @@ export default {
           style="width:100%;box-sizing:border-box;margin-bottom:6px;padding:5px 8px;background:#1e1e1e;color:#ddd;border:1px solid #444;border-radius:4px;font-size:12px;">
         <input v-model="editForm.due_date" type="date" placeholder="截止日期"
           style="width:100%;box-sizing:border-box;margin-bottom:6px;padding:5px 8px;background:#1e1e1e;color:#ddd;border:1px solid #444;border-radius:4px;font-size:12px;">
+        <input v-model="editForm.parent_id" type="text" list="aw-task-ids" placeholder="父任务 ID（留空为顶层任务）"
+          style="width:100%;box-sizing:border-box;margin-bottom:6px;padding:5px 8px;background:#1e1e1e;color:#ddd;border:1px solid #444;border-radius:4px;font-size:12px;">
         <button @click="saveTask" :disabled="busy"
           style="padding:5px 12px;background:#1f6feb;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px;">保存</button>
       </div>
+
+      <!-- 父任务 / 子任务 -->
+      <div v-if="parentTaskOf(selected)" style="font-size:12px;margin-bottom:6px;">
+        父任务：
+        <a href="#" @click.prevent="jumpToTask(selected.parent_id)"
+          style="color:#58a6ff;text-decoration:none;">{{ linkTitle({ task_id: selected.parent_id }) }}</a>
+      </div>
+      <div style="font-size:12px;font-weight:600;margin:10px 0 6px;">
+        子任务 ({{ childTasks.length }})
+        <span v-if="childTasks.length" style="color:#58a6ff;font-weight:400;">
+          · {{ childProgress(childTasks.filter(c => c.status === 'completed').length, childTasks.length) }}
+        </span>
+      </div>
+      <div v-for="c in childTasks" :key="c.id"
+        @click="jumpToTask(c.id)"
+        style="display:flex;justify-content:space-between;gap:6px;background:#1e1e1e;padding:5px 8px;border-radius:4px;margin-bottom:4px;cursor:pointer;">
+        <span style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+          <span style="color:#888;">{{ c.id }}</span> {{ c.title }}
+        </span>
+        <span :style="{color: STATUS_COLORS[c.status] || '#888', fontSize:'11px', whiteSpace:'nowrap'}">{{ STATUS_LABELS[c.status] || c.status }}</span>
+      </div>
+      <div v-if="!childTasks.length" style="font-size:11px;color:#888;">暂无子任务</div>
+
+      <!-- 关联任务 -->
+      <div style="font-size:12px;font-weight:600;margin:12px 0 6px;">关联任务 ({{ (selected.links || []).length }})</div>
+      <div v-for="(lk, i) in (selected.links || [])" :key="i"
+        style="display:flex;align-items:center;gap:6px;background:#1e1e1e;padding:5px 8px;border-radius:4px;margin-bottom:4px;">
+        <span style="font-size:11px;color:#d29922;white-space:nowrap;">{{ RELATION_LABELS[lk.relation] || lk.relation }}</span>
+        <a href="#" @click.prevent="jumpToTask(lk.task_id)"
+          style="flex:1;min-width:0;font-size:12px;color:#58a6ff;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
+          :title="lk.note || ''">{{ linkTitle(lk) }}</a>
+        <button @click="removeLink(selected, lk)" :disabled="busy"
+          style="padding:1px 6px;background:transparent;color:#f85149;border:1px solid #f8514955;border-radius:3px;cursor:pointer;font-size:10px;white-space:nowrap;">解除</button>
+      </div>
+      <div v-if="!(selected.links || []).length" style="font-size:11px;color:#888;margin-bottom:6px;">暂无关联</div>
+      <div style="display:flex;gap:6px;align-items:center;margin-bottom:10px;">
+        <input v-model="linkForm.target_id" type="text" list="aw-task-ids" placeholder="任务 ID"
+          style="flex:1;min-width:0;padding:4px 8px;background:#1e1e1e;color:#ddd;border:1px solid #444;border-radius:4px;font-size:12px;">
+        <select v-model="linkForm.relation"
+          style="padding:4px 6px;background:#1e1e1e;color:#ddd;border:1px solid #444;border-radius:4px;font-size:12px;">
+          <option v-for="r in RELATION_OPTIONS" :key="r" :value="r">{{ RELATION_LABELS[r] }}</option>
+        </select>
+        <button @click="addLink(selected)" :disabled="busy || !(linkForm.target_id || '').trim()"
+          style="padding:4px 10px;background:#238636;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px;white-space:nowrap;">关联</button>
+      </div>
+      <input v-model="linkForm.note" type="text" placeholder="关联说明（可选）"
+        style="width:100%;box-sizing:border-box;margin-bottom:10px;padding:4px 8px;background:#1e1e1e;color:#ddd;border:1px solid #444;border-radius:4px;font-size:12px;">
 
       <!-- 执行操作 -->
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;">
