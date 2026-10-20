@@ -237,8 +237,18 @@ export default {
       return buildChildrenMap(this.tasks);
     },
     // 树形扁平序列：按状态分组后，组内按父子层级排序（父在前、子紧随其后），
+    // 组内与子树均按期望完成时间（due_date）升序，无 due_date 排最后（created_at 兜底）。
     // 被收起父任务的整棵子树不输出。每项附带 depth/has_children/collapsed。
     groupedTasks() {
+      // 期望完成时间排序 key：无 due_date 的任务排最后
+      const dueSort = (a, b) => {
+        const da = (a.due_date || "").trim();
+        const db = (b.due_date || "").trim();
+        if (da && db) return da < db ? -1 : da > db ? 1 : 0;
+        if (da) return -1;
+        if (db) return 1;
+        return 0;
+      };
       const groups = {};
       for (const s of STATUS_ORDER) groups[s] = [];
       for (const t of this.tasks) {
@@ -253,7 +263,10 @@ export default {
       const walk = (task) => {
         if (visited.has(task.id)) return;
         visited.add(task.id);
-        const kids = childrenMap[task.id] || [];
+        const kids = (childrenMap[task.id] || [])
+          .map((cid) => byId[cid])
+          .filter(Boolean)
+          .sort(dueSort);
         const isCollapsed = this.collapsed.has(task.id);
         result.push({
           task,
@@ -261,21 +274,22 @@ export default {
           hasChildren: kids.length > 0,
           collapsed: isCollapsed,
           childDone: kids.filter(
-            (cid) => byId[cid] && byId[cid].status === "completed",
+            (c) => c.status === "completed",
           ).length,
           childTotal: kids.length,
         });
         if (isCollapsed) return;
-        for (const cid of kids) {
-          if (byId[cid]) walk(byId[cid]);
-        }
+        for (const kid of kids) walk(kid);
       };
       for (const s of STATUS_ORDER) {
-        // 先走顶层任务，再兜底走孤儿（父任务被过滤/删除）任务
-        for (const t of groups[s]) {
-          const pid = t.parent_id;
-          if (!pid || !byId[pid]) walk(t);
-        }
+        // 先走顶层任务（按期望完成时间排序），再兜底走孤儿（父任务被过滤/删除）任务
+        const roots = groups[s]
+          .filter((t) => {
+            const pid = t.parent_id;
+            return !pid || !byId[pid];
+          })
+          .sort(dueSort);
+        for (const t of roots) walk(t);
         for (const t of groups[s]) walk(t);
       }
       return STATUS_ORDER.filter((s) => groups[s].length > 0).map((s) => ({
@@ -1218,6 +1232,7 @@ export default {
           </div>
           <div v-if="tagsText(row.task.tags)" style="font-size:11px;color:#888;margin-top:2px;">{{ tagsText(row.task.tags) }}</div>
           <div v-if="row.task.due_date" style="font-size:11px;color:#d29922;margin-top:2px;">截止 {{ row.task.due_date }}</div>
+          <div v-if="row.task.status === 'completed' && row.task.completed_at" style="font-size:11px;color:#3fb950;margin-top:2px;">实际完成 {{ fmtDate(row.task.completed_at) }}</div>
         </div>
       </div>
     </div>
@@ -1230,6 +1245,7 @@ export default {
         <span :style="{color: STATUS_COLORS[selected.status] || '#888', fontSize:'12px'}">{{ STATUS_LABELS[selected.status] || selected.status }}</span>
       </div>
       <div style="font-size:11px;color:#888;margin:4px 0;">创建 {{ fmtDate(selected.created_at) }} · 更新 {{ fmtDate(selected.updated_at) }}</div>
+      <div v-if="selected.completed_at" style="font-size:11px;color:#3fb950;margin:4px 0;">实际完成 {{ fmtDate(selected.completed_at) }}</div>
 
       <!-- 编辑表单 -->
       <div style="margin:8px 0;">

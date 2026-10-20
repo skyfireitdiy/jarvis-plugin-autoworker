@@ -9,6 +9,8 @@
 - **任务与目录结构**：后端工作目录为所有任务的根目录；每个任务分配自动递增 ID（如 `T001`）与标题，用 `ID_标题` 命名子目录（如 `T001_实现登录功能`）；目录名固定用创建时的 `ID_标题`，标题修改只更新 `task.json` 不改目录名。
 - **任务状态持久化**：每个任务子目录下 `.jarvis/autoworker/task.json`，插件通过扫描 `<工作目录>/*/.jarvis/autoworker/task.json` 发现任务。状态：`pending` / `running` / `completed` / `abandoned`（无失败/阻塞）。
 - **树状任务组织**：任务可通过 `parent_id` 挂到父任务下（支持多级嵌套）。前端按树形展示，父任务可展开/收起，并显示子任务完成进度（如 `3/5 完成`）。子任务目录仍平铺在工作目录下（ID 全局递增），不改变目录层级。
+- **按期望完成时间排序**：任务列表（前端）组内按 `due_date`（期望完成时间）升序排列，截止越早越靠前；未设置截止时间的任务排在最后。后端 `list_tasks` 也支持 `sort_by="due_date"` 按相同规则排序。
+- **实际完成时间**：任务状态切换到 `completed` 时自动记录 `completed_at`（实际完成时间），切出 `completed` 时清空；前端详情页与列表展示该时间。
 - **任务间链接**：任务可通过 `links` 关联其他任务，关联类型：`related`（相关）/ `blocked_by`（被阻塞）/ `blocks`（阻塞）/ `duplicate`（重复）。前端详情页可查看、添加、解除关联，点击可跳转。
 - **双通道执行**：
   - 右键「创建 Agent 执行该任务」：复用宿主 `window.__jarvisCreateAgentForTask`，新建 Agent 的 `working_dir` 设为任务子目录，创建后标记任务为「执行中」。
@@ -76,6 +78,7 @@ autoworker/
   "status": "pending",
   "created_at": "2026-10-10T07:00:00+08:00",
   "updated_at": "2026-10-10T07:00:00+08:00",
+  "completed_at": "2026-10-11T09:30:00+08:00",
   "notes": [{ "time": "2026-10-10T07:05:00+08:00", "content": "…" }]
 }
 ```
@@ -86,14 +89,17 @@ autoworker/
   子任务列表（`children`）由扫描时反向推导，不落盘，避免双写不一致。
 - `links`：关联任务列表，`relation` 取值 `related` / `blocked_by` /
   `blocks` / `duplicate`，`note` 可选。
-- 旧数据（无 `parent_id` / `links` 字段）完全兼容：视为顶层任务、无关联。
+- `completed_at`：实际完成时间，状态切到 `completed` 时自动写入，切出时清空；
+  未完成/旧数据无此字段。
+- 旧数据（无 `parent_id` / `links` / `completed_at` 字段）完全兼容：视为顶层任务、无关联、无实际完成时间。
 
 ## 任务管理工具（task_manager）
 
 任意 Agent 可调用，动作（action）：
 
 - `list_tasks`：列出任务（默认扫描当前目录，或指定 workdir）；
-  `tree=true` 时每项附带 `depth` / `children_count` / `child_done_count`
+  `tree=true` 时每项附带 `depth` / `children_count` / `child_done_count`；
+  `sort_by="due_date"` 时按期望完成时间升序（无 due_date 排最后）
 - `get_task`：查看单个任务（含 `children` 与子任务完成进度）
 - `create_task`：创建任务，可用 `parent_id` 指定父任务（留空为顶层任务）
 - `update_task`：更新任务详情（标题/描述/标签/截止时间/父任务）
