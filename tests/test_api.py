@@ -195,3 +195,38 @@ def test_task_manager_tool_actions(workdir, monkeypatch):
     assert not res["success"]
     res, _ = run(action="delete_task", workdir=workdir, task_id=p, cascade=True)
     assert res["success"], res
+
+
+def test_completed_at_written_and_cleared(workdir):
+    """set_status 切到 completed 写入 completed_at，切出时清空。"""
+    tid = _create(workdir, "任务")
+    # 初始无 completed_at
+    assert "completed_at" not in api.get_task(workdir, tid)["data"]
+    # 切到 completed -> 写入
+    res = api.set_status(workdir, tid, "completed")
+    assert res["success"], res
+    data = api.get_task(workdir, tid)["data"]
+    assert data["completed_at"]
+    # 切出 completed -> 清空
+    res = api.set_status(workdir, tid, "pending")
+    assert res["success"], res
+    assert "completed_at" not in api.get_task(workdir, tid)["data"]
+    # 再次切回 completed -> 重新写入
+    res = api.set_status(workdir, tid, "completed")
+    assert res["success"], res
+    assert api.get_task(workdir, tid)["data"]["completed_at"]
+
+
+def test_list_tasks_sort_by_due_date(workdir):
+    """list_tasks sort_by=due_date 按期望完成时间升序，无 due_date 排最后。"""
+    a = api.create_task(workdir=workdir, title="A", due_date="2026-10-30")["data"]["id"]
+    b = api.create_task(workdir=workdir, title="B", due_date="2026-10-20")["data"]["id"]
+    c = api.create_task(workdir=workdir, title="C")["data"]["id"]
+    d = api.create_task(workdir=workdir, title="D", due_date="2026-10-25")["data"]["id"]
+
+    ids = [t["id"] for t in api.list_tasks(workdir, sort_by="due_date")["data"]]
+    # B(10-20) < D(10-25) < A(10-30) < C(无 due_date 排最后)
+    assert ids == [b, d, a, c]
+    # 默认（不传 sort_by）仍按 id 升序，向后兼容
+    ids_default = [t["id"] for t in api.list_tasks(workdir)["data"]]
+    assert ids_default == [a, b, c, d]

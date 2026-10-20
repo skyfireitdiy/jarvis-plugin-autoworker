@@ -455,6 +455,11 @@ def set_status(
     if not task:
         return {"success": False, "error": f"任务不存在: {task_id}"}
     task["status"] = status
+    # 实际完成时间：切到 completed 时记录，切出时清空（反映最近一次完成）
+    if status == "completed":
+        task["completed_at"] = _now()
+    else:
+        task.pop("completed_at", None)
     task["updated_at"] = _now()
     result = _write_task(task)
     if not result["success"]:
@@ -713,6 +718,19 @@ def unlink_task(
     }
 
 
+def _due_sort_key(task: Dict[str, Any]) -> tuple:
+    """按期望完成时间（due_date）升序排序的 key。
+
+    无 due_date 的任务排最后；同为无 due_date（或同值）时用 created_at 兜底，
+    保证顺序稳定可预期。
+    """
+    due = str(task.get("due_date") or "").strip()
+    created = str(task.get("created_at") or "")
+    if due:
+        return (0, due, created)
+    return (1, "", created)
+
+
 def _task_matches(
     task: Dict[str, Any],
     query: str,
@@ -763,8 +781,9 @@ def list_tasks(
     include_notes: bool = True,
     include_deleted: bool = False,
     tree: bool = False,
+    sort_by: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """列出后端工作目录下的任务（按 id 升序），支持过滤与分页。
+    """列出后端工作目录下的任务（默认按 id 升序），支持过滤与分页。
 
     - query: 关键词，大小写不敏感，匹配 title/description/notes 内容（任一命中即可）。
     - tags: 标签列表，需全部命中任务的 tags。
@@ -775,6 +794,8 @@ def list_tasks(
     - include_deleted: 是否包含已软删除任务，默认 False（列表默认隐藏已删除）。
     - tree: 是否返回树形结构（data 中每项带 depth/children_count/child_done_count），
       默认 False 保持扁平列表。每个任务始终带 parent_id 与 children（由 parent_id 推导）。
+    - sort_by: 排序方式。None（默认）按 id 升序（向后兼容）；"due_date" 按期望完成时间
+      （due_date）升序，无 due_date 的任务排最后（用 created_at 兜底保持稳定）。
 
     返回 data 为任务列表，并附带 total/offset/limit/has_more。
     """
@@ -798,6 +819,9 @@ def list_tasks(
     matched = [
         t for t in all_tasks if _task_matches(t, query, tag_list, status)
     ]
+    # 排序：默认 id 升序（_scan_tasks 已排好）；sort_by="due_date" 时按期望完成时间升序
+    if sort_by == "due_date":
+        matched.sort(key=_due_sort_key)
     total = len(matched)
 
     # 分页：limit 为 None 时不分页（保持旧行为）
