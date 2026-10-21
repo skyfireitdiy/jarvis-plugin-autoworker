@@ -230,3 +230,29 @@ def test_list_tasks_sort_by_due_date(workdir):
     # 默认（不传 sort_by）仍按 id 升序，向后兼容
     ids_default = [t["id"] for t in api.list_tasks(workdir)["data"]]
     assert ids_default == [a, b, c, d]
+
+
+def test_list_tasks_query_search(workdir):
+    """list_tasks query 模糊搜索：匹配 id/title/description/tags/notes。"""
+    a = _create(workdir, "实现登录功能")
+    b = _create(workdir, "实现注册功能")
+    _create(workdir, "部署到服务器")
+    # 给 a 加标签与关键信息，b 加描述
+    api.update_task(workdir, a, tags="前端,认证")
+    api.update_task(workdir, b, description="包含短信验证码")
+    api.add_note(workdir, a, "已确认使用 JWT 方案")
+
+    # 按标题
+    assert {t["id"] for t in api.list_tasks(workdir, query="登录")["data"]} == {a}
+    # 按 id（大小写不敏感）
+    assert {t["id"] for t in api.list_tasks(workdir, query=a.lower())["data"]} == {a}
+    # 按标签
+    assert {t["id"] for t in api.list_tasks(workdir, query="认证")["data"]} == {a}
+    # 按描述
+    assert {t["id"] for t in api.list_tasks(workdir, query="验证码")["data"]} == {b}
+    # 按 notes 内容
+    assert {t["id"] for t in api.list_tasks(workdir, query="JWT")["data"]} == {a}
+    # 无匹配
+    assert api.list_tasks(workdir, query="不存在的词")["data"] == []
+    # 空 query 返回全部
+    assert len(api.list_tasks(workdir, query="")["data"]) == 3

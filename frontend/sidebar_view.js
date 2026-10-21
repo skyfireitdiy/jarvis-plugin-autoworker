@@ -212,6 +212,8 @@ export default {
       loading: false,
       error: "",
       message: "",
+      // 模糊搜索关键词（空表示不过滤）
+      searchQuery: "",
       // 详情/编辑
       selected: null,
       editForm: { title: "", description: "", tags: "", due_date: todayStr(), parent_id: "" },
@@ -334,6 +336,7 @@ export default {
   beforeUnmount() {
     if (typeof this._offAgentChanged === "function") this._offAgentChanged();
     if (this._pollTimer) clearInterval(this._pollTimer);
+    if (this._searchTimer) clearTimeout(this._searchTimer);
     document.removeEventListener("click", this._onDocClick);
     document.removeEventListener("keydown", this._onDocKeydown);
   },
@@ -449,6 +452,7 @@ export default {
       this.workdir = active;
       this.dirInput = "";
       this.selected = null;
+      this.searchQuery = "";
       this.restoreGroupCollapse();
       this.refresh();
     },
@@ -576,6 +580,7 @@ export default {
       try {
         const payload = await callFunction("list_tasks", {
           workdir: this.workdir,
+          query: (this.searchQuery || "").trim(),
         }, this.nodeId);
         this.tasks = Array.isArray(payload.data) ? payload.data : [];
         // 同步刷新当前选中任务的详情（若仍在列表）
@@ -589,6 +594,14 @@ export default {
       } finally {
         if (!silent) this.loading = false;
       }
+    },
+    // 搜索框输入：防抖触发刷新（避免每次按键都请求）
+    onSearchInput() {
+      if (this._searchTimer) clearTimeout(this._searchTimer);
+      this._searchTimer = setTimeout(() => {
+        this.selected = null;
+        this.refresh();
+      }, 300);
     },
     fmtDate(s) {
       if (!s) return "";
@@ -1231,6 +1244,16 @@ export default {
       <div style="display:flex;gap:6px;margin-bottom:10px;">
         <button @click="toggleCreate"
           style="padding:4px 10px;background:#1f6feb;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px;">+ 新建任务</button>
+      </div>
+
+      <!-- 模糊搜索 -->
+      <div style="margin-bottom:10px;">
+        <input v-model="searchQuery" @input="onSearchInput" type="text"
+          placeholder="搜索任务（标题/描述/ID/标签/关键信息）…"
+          style="width:100%;box-sizing:border-box;padding:5px 8px;background:#1e1e1e;color:#ddd;border:1px solid #444;border-radius:4px;font-size:12px;">
+        <div v-if="searchQuery.trim()" style="font-size:11px;color:#888;margin-top:3px;">
+          共 {{ tasks.length }} 条匹配
+        </div>
       </div>
 
       <!-- 新建表单 -->

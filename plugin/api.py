@@ -746,7 +746,12 @@ def _task_matches(
             return False
     if query:
         q = query.lower()
-        haystack = [str(task.get("title", "")), str(task.get("description", ""))]
+        haystack = [
+            str(task.get("id", "")),
+            str(task.get("title", "")),
+            str(task.get("description", "")),
+            " ".join(str(t) for t in (task.get("tags") or [])),
+        ]
         for note in task.get("notes") or []:
             if isinstance(note, dict):
                 haystack.append(str(note.get("content", "")))
@@ -785,7 +790,7 @@ def list_tasks(
 ) -> Dict[str, Any]:
     """列出后端工作目录下的任务（默认按 id 升序），支持过滤与分页。
 
-    - query: 关键词，大小写不敏感，匹配 title/description/notes 内容（任一命中即可）。
+    - query: 关键词，大小写不敏感，匹配 id/title/description/tags/notes 内容（任一命中即可）。
     - tags: 标签列表，需全部命中任务的 tags。
     - status: 精确匹配任务状态（pending/running/completed/abandoned）。
     - limit/offset: 分页；limit 为 None 时不分页（返回全部，向后兼容）。
