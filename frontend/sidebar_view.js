@@ -190,6 +190,8 @@ export default {
       RELATION_OPTIONS,
       // 树形视图：已收起的任务 ID 集合（Set 在 Vue3 中响应式）
       collapsed: new Set(),
+      // 状态分组：已折叠的状态集合（Set 在 Vue3 中响应式）
+      collapsedGroups: new Set(),
       // 详情页：新增关联表单
       linkForm: { target_id: "", relation: "related", note: "" },
       // 详情页：当前查看的子任务（用于跳转）
@@ -297,6 +299,8 @@ export default {
         label: STATUS_LABELS[s],
         color: STATUS_COLORS[s],
         items: groups[s],
+        // 本组是否被折叠（状态分组折叠）
+        collapsed: this.collapsedGroups.has(s),
         // 本组内实际可见（未被子树收起）的条目
         visible: result.filter((r) => r.task.status === s ||
           (!STATUS_LABELS[r.task.status] && s === "pending")),
@@ -445,6 +449,7 @@ export default {
       this.workdir = active;
       this.dirInput = "";
       this.selected = null;
+      this.restoreGroupCollapse();
       this.refresh();
     },
     // 添加一个工作目录到当前节点：去重置顶（已存在则移到最前）、截断到历史上限
@@ -1012,6 +1017,54 @@ export default {
         this.collapsed.add(task.id);
       }
     },
+    // 折叠/展开某状态分组（状态分组折叠）
+    toggleGroup(status) {
+      if (!status || !STATUS_LABELS[status]) return;
+      if (this.collapsedGroups.has(status)) {
+        this.collapsedGroups.delete(status);
+      } else {
+        this.collapsedGroups.add(status);
+      }
+      this.saveGroupCollapse();
+    },
+    // 状态分组折叠持久化 key：jarvis_autoworker_group_collapse_<node>_<workdir>
+    groupCollapseKey() {
+      const node = String(this.nodeId || "master").trim() || "master";
+      const dir = String(this.workdir || "").trim();
+      return `jarvis_autoworker_group_collapse_${node}_${dir}`;
+    },
+    // 恢复当前节点+工作目录的状态分组折叠状态
+    restoreGroupCollapse() {
+      this.collapsedGroups = new Set();
+      try {
+        const raw = localStorage.getItem(this.groupCollapseKey());
+        if (raw) {
+          const arr = JSON.parse(raw);
+          if (Array.isArray(arr)) {
+            for (const s of arr) {
+              if (STATUS_LABELS[s]) this.collapsedGroups.add(s);
+            }
+          }
+        }
+      } catch {
+        /* 忽略存储异常 */
+      }
+    },
+    // 保存当前节点+工作目录的状态分组折叠状态
+    saveGroupCollapse() {
+      try {
+        if (this.collapsedGroups.size) {
+          localStorage.setItem(
+            this.groupCollapseKey(),
+            JSON.stringify([...this.collapsedGroups]),
+          );
+        } else {
+          localStorage.removeItem(this.groupCollapseKey());
+        }
+      } catch {
+        /* 忽略存储异常 */
+      }
+    },
     // 列表项缩进（按树深度）
     indentStyle(depth) {
       return { marginLeft: `${(depth || 0) * 14}px` };
@@ -1209,10 +1262,16 @@ export default {
       </datalist>
 
       <div v-for="g in groupedTasks" :key="g.status" style="margin-bottom:12px;">
-        <div :style="{color:g.color,fontSize:'11px',fontWeight:'600',marginBottom:'4px'}">
-          {{ g.label }} ({{ g.items.length }})
+        <div @click="toggleGroup(g.status)"
+          :title="g.collapsed ? '展开该状态任务' : '折叠该状态任务'"
+          style="display:flex;align-items:center;gap:4px;cursor:pointer;user-select:none;margin-bottom:4px;">
+          <span style="color:#888;font-size:11px;width:12px;display:inline-block;">{{ g.collapsed ? '▶' : '▼' }}</span>
+          <span :style="{color:g.color,fontSize:'11px',fontWeight:'600'}">
+            {{ g.label }} ({{ g.items.length }})
+          </span>
         </div>
-        <div v-for="row in g.visible" :key="row.task.id"
+        <div v-if="g.collapsed" style="font-size:11px;color:#888;margin-bottom:6px;padding-left:16px;">已折叠，点击标题展开</div>
+        <div v-for="row in g.visible" :key="row.task.id" v-show="!g.collapsed"
           @click="openTask(row.task)" @contextmenu.prevent="openItemMenu(row.task, $event)"
           :style="indentStyle(row.depth)"
           style="padding:8px;margin-bottom:6px;background:#252526;border-radius:6px;cursor:pointer;border-left:3px solid #58a6ff;">
